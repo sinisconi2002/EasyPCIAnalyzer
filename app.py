@@ -5,6 +5,9 @@ import os
 
 app = Flask(__name__)
 
+@app.route('/')
+def starting_point():
+    return "Dude, that's just the starting\n"
 @app.route('/analyzer')
 def analyze_core_dump():
     core_dump = request.args.get("core_dump")
