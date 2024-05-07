@@ -21,7 +21,6 @@ packaging==24.0
 portalocker==2.8.2
 pycparser==2.22
 PyJWT==2.8.0
-pywin32
 requests==2.31.0
 six==1.16.0
 typing_extensions==4.11.0
