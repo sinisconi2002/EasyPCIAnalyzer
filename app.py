@@ -23,7 +23,7 @@ def analyze_core_dump():
         blob_data = blob.download_blob()
         blob_data.readinto(my_blob)
 
-    return "Ce faci momi? Fac laba".format(to_search)
+    return "The answer".format(to_search)
 
 if __name__ == '__main__':
     app.run()
