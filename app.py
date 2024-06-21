@@ -26,6 +26,8 @@ def analyze():
 
     matches = search_pattern_in_binary_content(binary_content, rules, card)
     
+    if len(matches) == 0:
+        return jsonify(["No sensitive data found in the transaction!"]), 200
     return jsonify(matches)
 
 if __name__ == '__main__':
