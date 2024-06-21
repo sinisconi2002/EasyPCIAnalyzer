@@ -1,29 +1,32 @@
-from flask import Flask, request
-from azure.storage.blob import BlobClient
-import configparser
-import os
+from flask import Flask, request, jsonify
+from config import load_rules
+from blob_utils import download_blob_to_memory
+from pattern_matching import search_pattern_in_binary_content
+from Card import Card
+from pydantic import ValidationError
 
 app = Flask(__name__)
 
-@app.route('/')
-def starting_point():
-    return "Dude, that's just the starting\n"
-@app.route('/analyzer')
-def analyze_core_dump():
-    core_dump = request.args.get("core_dump")
-    to_search = request.args.get("to_search")
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    try:
+        data = request.get_json()
+        card_data = data['card']
+        binary_file_name = data['binary_file_name']
+        card = Card(**card_data)
+    except ValidationError as e:
+        return jsonify(e.errors()), 400
+    except KeyError:
+        return jsonify({"error": "Invalid input"}), 400
 
-    config = configparser.ConfigParser()
-    config.read('config.ini')
-    connection_string = config['General']['storage']
-    container_name = config['General']['container']
+    rules, account_name, account_key, container_name = load_rules()
 
-    blob = BlobClient.from_connection_string(conn_str=connection_string, container_name=container_name, blob_name='core.2137')
-    with open("coredump", "wb") as my_blob:
-        blob_data = blob.download_blob()
-        blob_data.readinto(my_blob)
+    binary_file = download_blob_to_memory(account_name, account_key, container_name, binary_file_name)
+    binary_content = binary_file.read()
 
-    return "The answer".format(to_search)
+    matches = search_pattern_in_binary_content(binary_content, rules, card)
+    
+    return jsonify(matches)
 
 if __name__ == '__main__':
-    app.run()
+    app.run(debug=True)
