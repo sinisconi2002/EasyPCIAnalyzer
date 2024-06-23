@@ -11,7 +11,7 @@ app = Flask(__name__)
 def analyze():
     try:
         data = request.get_json()
-        card_data = data['card']
+        card_data = data['cardData']
         binary_file_name = data['binary_file_name']
         card = Card(**card_data)
     except ValidationError as e:
@@ -28,7 +28,7 @@ def analyze():
     
     if len(matches) == 0:
         return jsonify(["No sensitive data found in the transaction!"]), 200
-    return jsonify(matches)
+    return jsonify(matches), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
