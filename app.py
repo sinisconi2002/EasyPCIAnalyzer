@@ -30,5 +30,9 @@ def analyze():
         return jsonify(["No sensitive data found in the transaction!"]), 200
     return jsonify(matches), 200
 
+@app.route('/dummy_route', methods=['GET'])
+def get_rules():
+    return jsonify({"rules": "dummy rules"}), 200
+
 if __name__ == '__main__':
     app.run(debug=True)
