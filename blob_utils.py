@@ -1,10 +1,17 @@
 import io
-from azure.storage.blob import BlobServiceClient
+import boto3
+import os
 
-def download_blob_to_memory(account_name, account_key, container_name, blob_name):
-    connect_str = f"DefaultEndpointsProtocol=https;AccountName={account_name};AccountKey={account_key};EndpointSuffix=core.windows.net"
-    blob_service_client = BlobServiceClient.from_connection_string(connect_str)
-    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+def download_blob_to_memory(bucket_name, blob_name):
+    # R2 necesită endpoint, access_key și secret_key
+    # Acestea vor fi citite din variabilele de mediu din Render
+    s3_client = boto3.client(
+        's3',
+        endpoint_url=os.getenv('R2_ENDPOINT'),
+        aws_access_key_id=os.getenv('R2_ACCESS_KEY'),
+        aws_secret_access_key=os.getenv('R2_SECRET_KEY')
+    )
     
-    binary_content = blob_client.download_blob().readall()
+    response = s3_client.get_object(Bucket=bucket_name, Key=blob_name)
+    binary_content = response['Body'].read()
     return io.BytesIO(binary_content)
