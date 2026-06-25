@@ -2,7 +2,7 @@ import re
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-# Motor Presidio cu spaCy lightweight (en_core_web_sm)
+# Motor Presidio cu spaCy lightweight (Egoist cu RAM-ul)
 configuration = {
     "nlp_engine_name": "spacy",
     "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
@@ -15,7 +15,7 @@ presidio_engine = AnalyzerEngine(
     supported_languages=["en"]
 )
 
-# Recunoscător custom CVV
+# Recunoscător custom CVV (Baseline)
 cvv_recognizer = PatternRecognizer(
     supported_entity="CVV",
     patterns=[Pattern(name="cvv_pattern", regex=r"\b\d{3,4}\b", score=0.2)],
@@ -25,7 +25,7 @@ presidio_engine.registry.add_recognizer(cvv_recognizer)
 
 
 def luhn_valid(number: str) -> bool:
-    """Verifică dacă un număr respectă algoritmul matematic Luhn."""
+    """Verifică matematic și rece algoritmul Luhn."""
     try:
         digits = [int(d) for d in str(number)]
     except ValueError:
@@ -39,26 +39,17 @@ def luhn_valid(number: str) -> bool:
 
 
 def normalize_pan(pan: str) -> str:
-    """Normalizează PAN-ul (fără liniuțe sau spații) pentru validare."""
     return pan.replace("-", "").replace(" ", "").strip()
 
 
-def scan_with_presidio(text: str, chunk_size: int = 100000, overlap: int = 200) -> list:
-    """
-    Motor de detecție hibrid EasyPCI 2.0:
-    Presidio (Pattern Recognition) + Validare Luhn + Sliding Window.
+def scan_coredump(text: str, chunk_size: int = 100000, overlap: int = 200) -> list:
 
-    Sliding Window previne epuizarea memoriei pe artefacte masive.
-    Validarea Luhn elimină fals-pozitivele (ID-uri sesiune, pointeri).
-    CVV-urile sunt raportate doar în vecinătatea unui PAN valid (RCA Window).
-    """
     if not text:
         return []
 
     found_pans_set = set()
     found_cvvs_set = set()
 
-    # Sliding Window — procesare în chunk-uri cu overlap
     for i in range(0, len(text), chunk_size - overlap):
         chunk = text[i: i + chunk_size]
         results = presidio_engine.analyze(
@@ -67,36 +58,48 @@ def scan_with_presidio(text: str, chunk_size: int = 100000, overlap: int = 200) 
             language="en"
         )
 
-        # Filtrare PAN-uri cu validare Luhn obligatorie
-        pans_in_chunk = [r for r in results if r.entity_type == "CREDIT_CARD" and r.score > 0.6]
+        pans_in_chunk = [r for r in results if r.entity_type == "CREDIT_CARD" and r.score > 0.4]
         for r in pans_in_chunk:
             pan_str = normalize_pan(chunk[r.start:r.end])
             if luhn_valid(pan_str):
                 found_pans_set.add(pan_str)
 
-        # CVV-uri doar în vecinătatea unui PAN găsit (Root Cause Analysis Window)
         if pans_in_chunk:
-            cvvs_in_chunk = [r for r in results if r.entity_type == "CVV" and r.score > 0.5]
+            cvvs_in_chunk = [r for r in results if r.entity_type == "CVV" and r.score > 0.4]
             for r in cvvs_in_chunk:
                 found_cvvs_set.add(chunk[r.start:r.end])
 
-    # Construire alerte
     matches = []
     for pan in found_pans_set:
-        matches.append(f"CRITICAL: Found Credit Card (PAN): {pan}")
+        matches.append(f"CRITICAL [COREDUMP]: Found PAN linked to context -> {pan}")
     for cvv in found_cvvs_set:
-        matches.append(f"WARNING: Found CVV/CVC: {cvv}")
+        matches.append(f"WARNING [COREDUMP]: Found CVV/CVC nearby -> {cvv}")
 
     return matches
 
+def scan_logs(text: str) -> list:
+    if not text:
+        return []
+
+    results = presidio_engine.analyze(
+        text=text,
+        entities=["CREDIT_CARD", "EMAIL_ADDRESS", "IP_ADDRESS"],
+        language="en"
+    )
+
+    matches = []
+    for r in results:
+        if r.score >= 0.5:
+            found_value = text[r.start:r.end]
+            matches.append(f"🔥 ALERTĂ LOG: Detectat {r.entity_type} -> {found_value}")
+
+    return list(set(matches))  # Returnăm unice
+
+
 
 def add_custom_rule(entity: str, patterns: list, context: list):
-    """
-    Încarcă reguli definite de utilizator direct în motorul Presidio.
-    Folosit de endpoint-ul POST /rules/upload.
-    """
     presidio_patterns = [
-        Pattern(name=f"{entity}_pattern_{i}", regex=p, score=0.5)
+        Pattern(name=f"{entity}_pattern_{i}", regex=p, score=0.6)
         for i, p in enumerate(patterns)
     ]
     custom_recognizer = PatternRecognizer(
