@@ -1,17 +1,34 @@
 import re
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
-from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern, RecognizerRegistry
 
-# Configurăm Presidio să folosească modelul "sm" (Lightweight pentru Render)
-configuration = {
-    "nlp_engine_name": "spacy",
-    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
-}
-provider = NlpEngineProvider(nlp_configuration=configuration)
-nlp_engine = provider.create_engine()
+# from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-# Inițializare motor Presidio cu motorul ușor
-presidio_engine = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
+# # Configurăm Presidio să folosească modelul "sm" (Lightweight pentru Render)
+# configuration = {
+#     "nlp_engine_name": "spacy",
+#     "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+# }
+# provider = NlpEngineProvider(nlp_configuration=configuration)
+# # nlp_engine = provider.create_engine()
+#
+#
+# # Inițializare motor Presidio cu motorul ușor
+# presidio_engine = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
+
+# Presidio fără spaCy — mod Pattern-Only (lightweight pentru Render Free)
+registry = RecognizerRegistry()
+registry.load_predefined_recognizers()
+
+# Augmentăm cu recunoscător custom CVV
+cvv_recognizer = PatternRecognizer(
+    supported_entity="CVV",
+    patterns=[Pattern(name="cvv_pattern", regex=r"\b\d{3,4}\b", score=0.2)],
+    context=["cvv", "cvv2", "security", "security_code", "check", "auth", "cvc"]
+)
+registry.add_recognizer(cvv_recognizer)
+
+# Motor fără NLP engine — folosește doar pattern recognizers + Luhn intern
+presidio_engine = AnalyzerEngine(registry=registry, supported_languages=["en"], nlp_engine=None)
 
 # Augmentăm motorul cu un recunoscător custom pentru CVV-uri
 cvv_recognizer = PatternRecognizer(
