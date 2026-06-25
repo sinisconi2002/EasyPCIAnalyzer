@@ -1,54 +1,27 @@
-from flask import Flask, request, jsonify
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
-import boto3
 import os
+import re
 import json
 import string
 
+from flask import Flask, request, jsonify
+from blob_utils import download_blob_to_memory, test_connection
+from analyzer_engine import scan_with_presidio, add_custom_rule
+
 app = Flask(__name__)
-presidio_engine = AnalyzerEngine()
 RULES_FILE = 'custom_rules.json'
 
-# --- CONFIGURARE CLOUDFLARE R2 ---
-R2_ENDPOINT = os.getenv("R2_ENDPOINT", "https://<account_id>.r2.cloudflarestorage.com")
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY", "cheia_ta")
-R2_SECRET_KEY = os.getenv("R2_SECRET_KEY", "secretul_tau")
+# Bucket-ul R2 din care tragem coredump-urile
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "easypci-dumps")
 
-s3_client = boto3.client(
-    's3',
-    endpoint_url=R2_ENDPOINT,
-    aws_access_key_id=R2_ACCESS_KEY,
-    aws_secret_access_key=R2_SECRET_KEY
-)
 
-
-def load_saved_rules():
-    """Încarcă regulile la pornire, protejat la fișiere goale."""
-    if os.path.exists(RULES_FILE) and os.path.getsize(RULES_FILE) > 0:
-        try:
-            with open(RULES_FILE, 'r') as f:
-                rules = json.load(f)
-                for rule in rules:
-                    inject_rule_to_presidio(rule['entity'], rule['patterns'], rule['context'])
-            print(f"[OK] Incarcat reguli custom.")
-        except Exception as e:
-            print(f"[ERROR] JSON invalid: {e}")
-
-
-def inject_rule_to_presidio(entity, patterns, context):
-    presidio_patterns = [Pattern(name=f"{entity}_pat_{i}", regex=p, score=0.8) for i, p in enumerate(patterns)]
-    custom_recognizer = PatternRecognizer(supported_entity=entity, patterns=presidio_patterns, context=context)
-    presidio_engine.registry.add_recognizer(custom_recognizer)
-
-
-def extract_strings_from_binary(file_path, min_length=4):
-    """Extrage caracterele printabile dintr-un coredump binar (simulează comanda 'strings')"""
-    with open(file_path, 'rb') as f:
-        data = f.read()
+# ── Utilitar: extragere strings printabile din stream binar ──────────
+def extract_strings_from_stream(byte_stream, min_length=4):
+    """Extrage caracterele printabile dintr-un coredump binar (echivalent 'strings')."""
+    data = byte_stream.read()
     printable = set(bytes(string.printable, 'ascii'))
     result = []
     current_string = bytearray()
+
     for byte in data:
         if byte in printable:
             current_string.append(byte)
@@ -56,13 +29,32 @@ def extract_strings_from_binary(file_path, min_length=4):
             if len(current_string) >= min_length:
                 result.append(current_string.decode('ascii'))
             current_string = bytearray()
+
     if len(current_string) >= min_length:
         result.append(current_string.decode('ascii'))
+
     return " ".join(result)
 
 
-# --- RUTE API ---
+# ── Încărcare reguli custom salvate (la pornire) ────────────────────
+def load_saved_rules():
+    """Încarcă regulile persistate la pornirea aplicației."""
+    if os.path.exists(RULES_FILE) and os.path.getsize(RULES_FILE) > 0:
+        try:
+            with open(RULES_FILE, 'r') as f:
+                rules = json.load(f)
+                for rule in rules:
+                    add_custom_rule(rule['entity'], rule['patterns'], rule['context'])
+            print("[OK] Reguli custom încărcate în motorul Presidio.")
+        except Exception as e:
+            print(f"[ERROR] Eroare la încărcarea regulilor: {e}")
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  RUTE API
+# ══════════════════════════════════════════════════════════════════════
+
+# ── GET /rules — Listează regulile custom încărcate ──────────────────
 @app.route('/rules', methods=['GET'])
 def get_rules():
     if os.path.exists(RULES_FILE) and os.path.getsize(RULES_FILE) > 0:
@@ -71,6 +63,7 @@ def get_rules():
     return jsonify([]), 200
 
 
+# ── POST /rules/upload — Adaugă o regulă custom în Presidio ─────────
 @app.route('/rules/upload', methods=['POST'])
 def upload_rule():
     data = request.json
@@ -78,8 +71,13 @@ def upload_rule():
     patterns = data.get('patterns', [])
     context = data.get('context', [])
 
-    inject_rule_to_presidio(entity, patterns, context)
+    if not entity or not patterns:
+        return jsonify({"error": "Entity și patterns sunt obligatorii!"}), 400
 
+    # Injectare în motorul unic din analyzer_engine.py
+    add_custom_rule(entity, patterns, context)
+
+    # Persistare pe disc (supraviețuiește restart-urilor)
     saved_rules = []
     if os.path.exists(RULES_FILE) and os.path.getsize(RULES_FILE) > 0:
         with open(RULES_FILE, 'r') as f:
@@ -89,88 +87,101 @@ def upload_rule():
     with open(RULES_FILE, 'w') as f:
         json.dump(saved_rules, f, indent=4)
 
-    return jsonify({"message": "Regula salvata."}), 200
+    return jsonify({"message": f"Regulă pentru '{entity}' salvată și activată."}), 200
 
 
+# ── POST /scan/modern — Motor NLP Hibrid (EasyPCI 2.0) ──────────────
+#    Presidio + Luhn + Sliding Window + CVV contextual
+#    Acceptă: core dump binar (via R2) SAU text cleartext (loguri)
 @app.route('/scan/modern', methods=['POST'])
 def scan_modern():
     data = request.json
     text_to_scan = ""
+    is_cleartext_log = False
 
-    # Scenariul A: Apel venit din RunTest-ul tău original (Coredump via R2)
+    # Scenariul A: Core Dump binar din Cloudflare R2
     if 'binary_file_name' in data:
         file_name = data['binary_file_name']
-        local_file_path = f"/tmp/{file_name}"
         try:
-            s3_client.download_file(R2_BUCKET_NAME, file_name, local_file_path)
-            text_to_scan = extract_strings_from_binary(local_file_path)
+            memory_stream = download_blob_to_memory(R2_BUCKET_NAME, file_name)
+            text_to_scan = extract_strings_from_stream(memory_stream)
         except Exception as e:
             return jsonify([f"[EROARE R2] Nu s-a putut procesa coredump-ul: {str(e)}"]), 500
-        finally:
-            if os.path.exists(local_file_path):
-                os.remove(local_file_path)
 
-    # Scenariul B: Apel venit din noua pagină de Log-uri text chior (Req 10)
+    # Scenariul B: Log cleartext (Cerința 10 PCI DSS)
     elif 'text' in data:
         text_to_scan = data['text']
-    else:
-        return jsonify(["[EROARE] Payload invalid."]), 400
+        is_cleartext_log = True
 
-    # Scanare cu Presidio AI
-    results = presidio_engine.analyze(text=text_to_scan, language='en')
-    alerts = []
-    for res in results:
-        alerts.append(f"[PCI DSS Alert] - Detectat {res.entity_type} (Scor: {res.score})")
+    else:
+        return jsonify(["[EROARE] Payload invalid — trimite binary_file_name sau text."]), 400
+
+    # Scanare prin motorul hibrid (Presidio + Luhn + Sliding Window)
+    alerts = scan_with_presidio(text_to_scan)
+
+    # Avertizare specifică PCI DSS Cerința 10
+    if is_cleartext_log and alerts:
+        alerts.insert(0, "[PCI DSS Req. 10] VIOLAȚIE: Date sensibile detectate în jurnale cleartext!")
 
     if not alerts:
         alerts.append("[OK] Nu au fost detectate date sensibile.")
+
     return jsonify(alerts), 200
 
 
+# ── POST /scan/classic — Motor Regex pur (EasyPCI 1.0) ───────────────
+#    Fără validare Luhn, fără context semantic — demonstrează fals-pozitive
+@app.route('/scan/classic', methods=['POST'])
+def scan_classic():
+    data = request.json
+    text_to_scan = ""
 
+    if 'binary_file_name' in data:
+        file_name = data['binary_file_name']
+        try:
+            memory_stream = download_blob_to_memory(R2_BUCKET_NAME, file_name)
+            text_to_scan = extract_strings_from_stream(memory_stream)
+        except Exception as e:
+            return jsonify([f"[EROARE R2] Scanare clasică eșuată: {str(e)}"]), 500
+    elif 'text' in data:
+        text_to_scan = data['text']
+    else:
+        return jsonify(["[EROARE] Lipsește binary_file_name sau text."]), 400
+
+    alerts = []
+
+    # Match exact pe cardul specific (dacă e trimis)
+    if 'cardData' in data and data['cardData']:
+        specific_pan = data['cardData'].get('Pan', '')
+        if specific_pan and specific_pan in text_to_scan:
+            alerts.append(f"[CLASSIC REGEX] MATCH EXACT: Cardul ({specific_pan}) găsit în clar în memorie!")
+
+    # Regex brut — orice secvență de 13-19 cifre
+    pan_pattern = re.compile(r'\b(?:\d[ -]*?){13,19}\b')
+    matches = pan_pattern.findall(text_to_scan)
+
+    for match in set(matches):
+        clean_match = re.sub(r'\D', '', match)
+        if 13 <= len(clean_match) <= 19:
+            alerts.append(f"[CLASSIC REGEX] Posibil PAN brut: {clean_match}")
+
+    if not alerts:
+        alerts.append("[OK] Motorul Classic (Regex) nu a găsit potriviri.")
+
+    return jsonify(alerts), 200
+
+
+# ── GET /dummy_route — Health check simplu ───────────────────────────
 @app.route('/dummy_route', methods=['GET'])
-def get_rules():
-    return jsonify({"rules": "dummy rules"}), 200
+def dummy_route():
+    return jsonify({"status": "EasyPCI Analyzer is running"}), 200
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  PORNIRE APLICAȚIE
+# ══════════════════════════════════════════════════════════════════════
+load_saved_rules()
 
 if __name__ == '__main__':
+    test_connection()
     app.run(host='0.0.0.0', port=5000)
-
-# from flask import Flask, request, jsonify
-# from config import load_rules
-# from blob_utils import download_blob_to_memory
-# from pattern_matching import search_pattern_in_binary_content
-# from Card import Card
-# from pydantic import ValidationError
-
-# app = Flask(__name__)
-
-# @app.route('/analyze', methods=['POST'])
-# def analyze():
-#     try:
-#         data = request.get_json()
-#         card_data = data['cardData']
-#         binary_file_name = data['binary_file_name']
-#         card = Card(**card_data)
-#     except ValidationError as e:
-#         return jsonify(e.errors()), 400
-#     except KeyError:
-#         return jsonify({"error": "Invalid input"}), 400
-
-#     rules, account_name, account_key, container_name = load_rules()
-
-#     binary_file = download_blob_to_memory(account_name, account_key, container_name, binary_file_name)
-#     binary_content = binary_file.read()
-
-#     matches = search_pattern_in_binary_content(binary_content, rules, card)
-    
-#     if len(matches) == 0:
-#         return jsonify(["No sensitive data found in the transaction!"]), 200
-#     return jsonify(matches), 200
-
-# @app.route('/dummy_route', methods=['GET'])
-# def get_rules():
-#     return jsonify({"rules": "dummy rules"}), 200
-
-# if __name__ == '__main__':
-#     app.run(debug=True)
