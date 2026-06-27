@@ -35,7 +35,7 @@ def load_saved_rules():
             with open(RULES_FILE, 'r') as f:
                 rules = json.load(f)
                 for rule in rules:
-                    add_custom_rule(rule['entity'], rule['patterns'], rule['context'])
+                    add_custom_rule(rule.get('rule_name', rule['entity']), rule['entity'], rule['patterns'], rule['context'])
             print("[OK] Reguli custom încărcate în motorul Presidio.")
         except Exception as e:
             print(f"[ERROR] Eroare la încărcarea regulilor: {e}")
@@ -155,7 +155,7 @@ def auto_extract_rule_from_file():
 
 
     default_pan_patterns = [r"\b(?:\d[ -]*?){13,19}\b"]
-    add_custom_rule("CREDIT_CARD", default_pan_patterns, new_context)
+    add_custom_rule(f"StructLeak_{class_name}", "CREDIT_CARD", default_pan_patterns, new_context)
 
     saved_rules = []
     if os.path.exists(RULES_FILE) and os.path.getsize(RULES_FILE) > 0:
@@ -163,6 +163,7 @@ def auto_extract_rule_from_file():
             saved_rules = json.load(f)
 
     saved_rules.append({
+        "rule_name": f"StructLeak_{class_name}",
         "entity": "CREDIT_CARD",
         "patterns": default_pan_patterns,
         "context": new_context
