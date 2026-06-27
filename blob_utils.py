@@ -3,8 +3,6 @@ import boto3
 import os
 
 def download_blob_to_memory(bucket_name, blob_name):
-    # R2 necesită endpoint, access_key și secret_key
-    # Acestea vor fi citite din variabilele de mediu din Render
     s3_client = boto3.client(
         's3',
         endpoint_url=os.getenv('R2_ENDPOINT'),
