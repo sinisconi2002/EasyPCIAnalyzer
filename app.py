@@ -173,7 +173,7 @@ def auto_extract_rule_from_file():
         json.dump(saved_rules, f, indent=4)
 
     return jsonify({
-        "message": f"Succes! AI-ul a învățat clasa '{class_name}'.",
+        "message": f"Succes! Clasa invata: '{class_name}'.",
         "extracted_context": new_context
     }), 200
 
