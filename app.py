@@ -148,8 +148,12 @@ def auto_extract_rule_from_file():
     class_name = class_match.group(1)
 
     cpp_keywords = {'std', 'string', 'class', 'public', 'private', 'int', 'double'}
-    words = {w for w in re.findall(r'\b[a-z][a-zA-Z0-9]{2,}\b', code_text) if w not in cpp_keywords}
 
+    words = []
+    for m in re.finditer(r'\bstring\s*&?\s*([a-zA-Z_]\w*)\s*;', code_text):
+        name = m.group(1)
+        if name not in words:
+            words.append(name)
 
     new_context = [class_name] + list(words)
 
